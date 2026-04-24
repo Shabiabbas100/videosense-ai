@@ -1,6 +1,6 @@
-# 🎥 VideoSense AI
+#                    <div align="center">🎥 VideoSense AI</div>
 
-> **AI-Powered Multimodal RAG Video Analytics & Search Engine**
+**<div>AI-Powered Multimodal RAG Video Analytics & Search Engine </div>**
 
 VideoSense AI is an intelligent video search and surveillance system that helps users find specific moments in footage using **natural language queries** such as *"man trying to enter"* or *"red car moving fast"*.
 
