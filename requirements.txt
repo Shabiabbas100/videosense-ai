@@ -1,0 +1,8 @@
+streamlit
+opencv-python
+faiss-cpu
+transformers
+torch
+sentence-transformers
+google-generativeai
+python-dotenv

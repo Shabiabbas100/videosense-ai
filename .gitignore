@@ -1,0 +1,11 @@
+# Ignore Virtual Environment
+project_venv/
+env/
+
+# Ignore Secret Keys
+.env
+
+# Ignore Cache and heavy video/data files
+__pycache__/
+*.mp4               #ignore all video ending with .mp4
+utils/clips/
