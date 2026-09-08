@@ -1,130 +1,137 @@
+import os
+import json
+import faiss
+import numpy as np
 import torch
 from transformers import CLIPProcessor, CLIPModel
-import numpy as np
-import json
-import os
-import faiss
 
+# Global variables to store models in memory so they only load once
+_clip_model = None
+_clip_processor = None
+_faiss_index = None
+_video_metadata = []
 
-"""
-Create a FAISS index from a list of video embeddings.
+def load_models():
+    """
+    Loads the CLIP AI model into the computer's memory.
+    We only load it once when someone actually searches for a video, 
+    so the app starts up very fast and saves memory.
+    """
+    global _clip_model, _clip_processor
+    if _clip_model is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        _clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+        _clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+    return _clip_model, _clip_processor
 
-Args:
-    embeddings_data (list): A list of dictionaries containing video embeddings.
-
-Returns:
-    faiss.IndexFlatL2: A FAISS index for video retrieval.
-"""
-
-folder_path="utils/clips"
-
-json_files = [f for f in os.listdir(folder_path) if f.endswith(".json")]
-
-embeddings_list = []
-filenames = []
-
-for file in json_files:
-    file_path = os.path.join(folder_path, file)
-    with open(file_path, "r") as f:
-        data = json.load(f)
+def build_faiss_index(folder_path="utils/clips"):
+    """
+    Reads all the JSON files saved by our video pipeline and puts them into a fast search database (FAISS).
     
-    if "visual_embedding" in data and isinstance(data["visual_embedding"], list):
-        embedding = np.array(data["visual_embedding"], dtype=np.float32)
-        if embedding.shape[0] == 512:  # Ensure correct dimension
-            embeddings_list.append(embedding)
-            filenames.append(data["filename"])
+    Args:
+        folder_path (str): The folder where our video clips and JSON files are saved.
+    """
+    global _faiss_index, _video_metadata
+    _video_metadata = []
+    embeddings_list = []
+    
+    if not os.path.exists(folder_path):
+        print(f"Folder {folder_path} not found.")
+        return
 
-embeddings_array = np.vstack(embeddings_list)  # Shape: (N, 512)
-
-dimension = 512
-index = faiss.IndexFlatL2(dimension)  # L2 (Euclidean) search
-index.add(embeddings_array)
-
-faiss.write_index(index, "video_embeddings.index")
-
-# Save filenames to match search results later
-with open("video_filenames.json", "w") as f:
-    json.dump(filenames, f)
-
-print(f"Stored {len(embeddings_list)} video embeddings in FAISS.")
-
-# FAISS Configuration: Ensure single-threading to prevent potential crashes.
-faiss.omp_set_num_threads(1)
-
-with open("video_filenames.json", "r") as f:
-    filenames = json.load(f)
-
-folder_path = "utils/clips"
-embeddings_data = []
-
-for filename in os.listdir(folder_path):
-    if filename.endswith("_embedding.json"):  
-        with open(os.path.join(folder_path, filename), "r") as f:
-            video_data = json.load(f)
-            embeddings_data.append(video_data)
-
-print(f"Loaded {len(embeddings_data)} video embeddings.")
-
-embeddings = np.array([d["visual_embedding"] for d in embeddings_data], dtype=np.float32)
-d = embeddings.shape[1]
-index = faiss.IndexFlatL2(d)
-index.add(embeddings)
-
-faiss.write_index(index, "video_embeddings.index")
-print("FAISS index saved.")
-
+    for filename in sorted(os.listdir(folder_path)):
+        if filename.endswith("_embedding.json"):
+            file_path = os.path.join(folder_path, filename)
+            with open(file_path, "r") as f:
+                data = json.load(f)
+            
+            # Grab the mixed vector (visual + objects) we made earlier
+            if "fused_embedding" in data:
+                embeddings_list.append(data["fused_embedding"])
+                _video_metadata.append(data["filename"])
+    
+    if not embeddings_list:
+        print("No video data found to save.")
+        return
+        
+    embeddings_array = np.array(embeddings_list, dtype=np.float32)
+    
+    # We use Cosine Similarity (IndexFlatIP) to match vectors.
+    # This finds the closest meaning between the search text and the video.
+    _faiss_index = faiss.IndexFlatIP(512) 
+    _faiss_index.add(embeddings_array)
+    
+    faiss.write_index(_faiss_index, "video_embeddings.index")
+    with open("video_filenames.json", "w") as f:
+        json.dump(_video_metadata, f)
+        
+    print(f"Successfully saved {len(embeddings_list)} videos in the search database.")
 
 def get_text_embedding(text):
     """
-    Convert a text query into a CLIP embedding.
-
-    Args:
-        text (str): The text query to encode.
-
-    Returns:
-        numpy.ndarray: The text embedding as a NumPy array.
-    """
-    clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-    processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-    print("CLIP model loaded.")
-    print("Text query:", text)
+    Takes the words a user types (like 'a man running') and turns them into a number vector.
+    This allows us to match the text with the video vectors.
     
-    inputs = processor(text=text, return_tensors="pt", padding=True)
-
-    # Move model and inputs to GPU if available for faster processing
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    clip_model.to(device)
-    inputs = {key: value.to(device) for key, value in inputs.items()}
-
-    text_embedding = clip_model.get_text_features(**inputs)
-
-    # Safety Check: Extract the actual tensor from the Box/Object
-    if hasattr(text_embedding, 'text_embeds'):
-        text_embedding = text_embedding.text_embeds
-    elif hasattr(text_embedding, 'pooler_output'):
-        text_embedding = text_embedding.pooler_output
-
-    return text_embedding.detach().cpu().numpy().astype("float32")
-
-def search_videos_by_text(query_text, top_k=1):
-    """
-    Search for videos in the FAISS index using a text query.
-
     Args:
-        query_text (str): The text query for video retrieval.
-        top_k (int): The number of top results to retrieve.
-
+        text (str): The search query typed by the user.
+        
     Returns:
-        list: A list of filenames corresponding to the top matching videos.
+        numpy array: A 512-number vector representing the text's meaning.
     """
+    model, processor = load_models()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    inputs = processor(text=[text], return_tensors="pt", padding=True).to(device)
+    
+    with torch.no_grad():
+        text_out = model.get_text_features(**inputs)
+        
+        # Extract the raw tensor safely 
+        text_tensor = text_out.pooler_output if hasattr(text_out, 'pooler_output') else (text_out[0] if not isinstance(text_out, torch.Tensor) else text_out)
+        
+        # Normalize the vector so it matches the video math perfectly
+        text_tensor /= text_tensor.norm(p=2, dim=-1, keepdim=True)
+        
+    return text_tensor.cpu().numpy().astype("float32")
+
+def search_videos_by_text(query_text, top_k=1, folder_path="utils/clips"):
+    """
+    Searches the database for the most similar video clip based on the user's text.
+    
+    Args:
+        query_text (str): What the user is looking for.
+        top_k (int): How many video results to return.
+        folder_path (str): Where the clips are saved.
+        
+    Returns:
+        list: The names of the best matching MP4 video files.
+    """
+    global _faiss_index, _video_metadata
+    
+    # Build or load the database if it is not ready
+    if _faiss_index is None:
+        if not os.path.exists("video_embeddings.index"):
+            build_faiss_index(folder_path)
+        else:
+            _faiss_index = faiss.read_index("video_embeddings.index")
+            with open("video_filenames.json", "r") as f:
+                _video_metadata = json.load(f)
+
+    if _faiss_index is None or _faiss_index.ntotal == 0:
+        print("Database is empty.")
+        return []
+        
+    # Turn search text into a vector and find the closest match
     query_embedding = get_text_embedding(query_text)
-    print("Query embedding shape:", query_embedding.shape)
-    print("FAISS index dimension:", index.d)
+    distances, indices = _faiss_index.search(query_embedding, top_k)
     
-    distances, indices = index.search(query_embedding, top_k)
-    similar_videos = [embeddings_data[i]["filename"] for i in indices[0] if i < len(embeddings_data)]
-    
-    print(f"Found {len(similar_videos)} similar videos.")
-    print(f"Distances: {distances}")
-    
-    return similar_videos
+    results = []
+    for i in indices[0]:
+        if i != -1 and i < len(_video_metadata):
+            results.append(_video_metadata[i])
+            
+    return results
+
+if __name__ == "__main__":
+    build_faiss_index("clips")
+    print("Test Search Result:", search_videos_by_text("person"))
